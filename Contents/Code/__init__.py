@@ -1,252 +1,298 @@
-import re, sys, encodings.idna
-from PMS import Plugin, Log, DB, Thread, XML, HTTP, JSON, RSS, Utils
-from PMS.MediaXML import MediaContainer, DirectoryItem, VideoItem, SearchDirectoryItem
-from PMS.Shorthand import _L, _R
+import re
 
-import urllib, htmlentitydefs, datetime
+###################################################################################################
 
-TED_PLUGIN_PREFIX   = "/video/TED"
-TED_ROOT            = "http://www.ted.com/index.php/talks/list"
-TED_BASE            = "http://www.ted.com/index.php/"
-CACHE_TIME          = 3600 * 12
+PLUGIN_TITLE               = 'TED talks'
+VIDEO_PREFIX              = '/video/TED'
 
-dirs = [ ['Newest releases', 'NEWEST'], ['Date filmed', 'FILMED'], ['Most emailed' , 'MOSTEMAILED'], ['Most discussed' , 'MOSTDISCUSSED'], ['Most favorited' , 'MOSTFAVORITED'], ['Rated most jaw-dropping' , 'JAW-DROPPING'], ['Rated most persuasive' , 'PERSUASIVE'], ['Rated most courageous' , 'COURAGEOUS'], ['Rated most ingenious' , 'INGENIOUS'], ['Rated most fascinating' , 'FASCINATING'], ['Rated most inspiring' , 'INSPIRING'], ['Rated most beautiful' , 'BEAUTIFUL'], ['Rated funniest' , 'FUNNY'] ]
+TED_BASE        ="http://www.ted.com"
+TED_TALKS       ="http://www.ted.com/talks"
+TED_THEMES      ="http://www.ted.com/themes/atoz"
+TED_TAGS        ="http://www.ted.com/talks/tags"
+TED_SPEAKERS    ="http://www.ted.com/speakers/atoz/page1"
 
-sections = [ ['Top Twelves', 'talks/list'], ['All Talks', 'talks/list'], ['Themes', 'themes/list'], ['Tags', 'talks/tags'], ['Speakers', 'speakers/browse'] ]
+# Default artwork and icon(s)
+TEDart             = 'art-default.jpg'
+TEDthumb        = 'icon-default.jpg'
 
-####################################################################################################
+
+###################################################################################################
 def Start():
-  Plugin.AddRequestHandler(TED_PLUGIN_PREFIX, HandleVideosRequest, "TED Talks", "icon-default.png", "art-default.png")
-  Plugin.AddViewGroup("Details", viewMode="InfoList", contentType="items")
+  Plugin.AddPrefixHandler(VIDEO_PREFIX, VideoMainMenu, 'TED Talks',TEDthumb,TEDart)
+  Plugin.AddViewGroup("InfoList", viewMode="InfoList", mediaType="items")
+  Plugin.AddViewGroup("List", viewMode="List", mediaType="items")
+  
+  MediaContainer.art        =R(TEDart)
+  MediaContainer.title1     =PLUGIN_TITLE
+  DirectoryItem.thumb       =R(TEDthumb)
+
+  
+####################################################################################################
+
+def VideoMainMenu():
+    dir = MediaContainer(mediaType='video') 
+    dir.Append(Function(DirectoryItem(FrontPageList, "Front Page"), pageUrl = TED_BASE))
+    dir.Append(Function(DirectoryItem(ThemeList, "Themes"), pageUrl = TED_THEMES))
+    dir.Append(Function(DirectoryItem(TagsList, "Tags"), pageUrl = TED_TAGS))
+    dir.Append(Function(DirectoryItem(SpeakersList, "Speakers"), pageUrl = TED_SPEAKERS))
+    
+    return dir
+####################################################################################################
+
+def SpeakersList(sender,pageUrl):
+   
+    dir = MediaContainer(title2=sender.itemTitle, viewGroup="List")
+    
+    content = HTML.ElementFromURL(pageUrl)
+    page=HTTP.Request(pageUrl)
+
+    
+    for speakers in content.xpath('//div[@id="maincontent"]/div/div/div/ul/li/a'):
+        #Log(tags)
+        speakerurl=TED_BASE+speakers.get('href')
+        speakername=speakers.text
+        fname=speakername.split(" ")[0]
+        lname=speakername.split(" ")[1]
+        if fname=="":
+          speakername=lname
+        else:
+          speakername=lname + ", " + fname
+        #taken out becuase it was infinitely slower
+        #thumb=HTML.ElementFromURL(speakerurl).xpath('//link[@rel="image_src"]')[0].get('href')
+        dir.Append(Function(DirectoryItem(speakertalks, title=speakername), pageUrl = speakerurl))
+    
+
+    try:
+        next=TED_BASE + content.xpath('//a[@class="next"]')[0].get('href')
+        dir.Append(Function(DirectoryItem(SpeakersList, title="Next page ..."), pageUrl = next))
+    except: pass
+    return dir
 
 ####################################################################################################
-def HandleVideosRequest(pathNouns, count):
-  for p in pathNouns:
-    Log.Add("$pathNouns : " + Utils.DecodeUrlPathToString(p))
-  dir = MediaContainer("art-default.png", None, "TED Talks")
-  dir.SetAttr("content", "items")
-  Log.Add("Count: " + str(count))
-  # Top level menu
-  if count == 0:
-    for (n,v) in sections:
-      dir.AppendItem(DirectoryItem(Utils.EncodeStringToUrlPath(v+"$"+n), n, ""))
 
-  # Section menu.
-  elif count == 1:
-      (theSection,name) = Utils.DecodeUrlPathToString(pathNouns[0]).split('$')
-      dir.SetAttr("title2", name)
+def speakertalks(sender,pageUrl):
 
-      try:
-        pageCount = re.sub(r'.*?(\d+)$', r'\1', GetXML(TED_BASE + theSection, True).xpath("//div[@class='pagination clearfix']/p")[0].text)
-      except:
-        pageCount = 1
-      Log.Add("Page count: " + str(pageCount))
+    dir = MediaContainer(title2=sender.itemTitle, viewGroup="InfoList")
+    
+    pageUrl=pageUrl.replace("&#13","")
+    content = HTML.ElementFromURL(pageUrl).xpath('//dl[@class="box clearfix"]')
+    page=HTTP.Request(pageUrl)
 
-      if name == 'Tags':
-        for pageNum in range(1, int(pageCount) + 1):
-          try:
-            for anItem in GetXML(TED_BASE + theSection + '/page/' + str(pageNum), True).xpath("//div[@class='column']/div/ul/li/a"):
-              url = anItem.get('href')
-              title = anItem.text
-              dir.AppendItem(DirectoryItem(Utils.EncodeStringToUrlPath(url) + '$' + title, title, ''))
-          except:
-            pass
-      elif name == 'Top Twelves':
-        for (n,v) in dirs:
-          dir.AppendItem(DirectoryItem(Utils.EncodeStringToUrlPath(v + "$" + n), n, ""))
-      elif name == 'All Talks':
-        for pageNum in range(1, int(pageCount) + 1):
-          try:
-            for v in GetXML(TED_ROOT + '/page/' + str(pageNum), True).xpath("//div[@class='browser']/div/dl"):
-              dir.AppendItem(getVideoPageContents(scrapeVideoListingContents(v, True, False)))
-          except:
-            pass
-        #dir = getVideoPage(pathNouns[1])
-      elif name == 'Speakers':
-        for pageNum in range(1, int(pageCount) + 1):
-          #try:
-          for v in GetXML(TED_BASE + theSection + '?event=0&tagid=0&alphabyfirstname=all&orderedby=ALPHABET&page=' + str(pageNum), True).xpath("//div[@class='speakerListContainer clearfix']/dl"):
-            dir.AppendItem(scrapeVideoListing(v, False, False, hasConferenceTitle=False))
-          #except:
-            #pass
-      elif name == 'Themes':
-        for pageNum in range(1, int(pageCount) + 1):
-          #try:
-          for v in GetXML(TED_BASE + theSection + '/page/' + str(pageNum), True).xpath("//div[@class='themeListContainer clearfix']/dl"):
-            Log.Add(v)
-            dir.AppendItem(scrapeVideoListing(v, False, False, hasConferenceTitle=False))
-          #except:
-            #pass
+    count=-1
+    
+    for boxes in content:
+      count=count+1
+      for things in boxes[0]:
+         thumb=things.xpath("img")[1].get('src')
+      for things in boxes[1]:
+         link=things.xpath('//ul/li/h4/a')[count].get('href')
+         title=things.xpath('//ul/li/h4/a')[count].text
+         subtitle=things.xpath('//ul/li/em')[count].text
+         link=TED_BASE + link
+         vidUrl=link     
+         content=HTML.ElementFromURL(vidUrl).xpath('//dl[@class="downloads"]')[0].xpath('//dt')[4]
+         vidUrl2=content[0].get('href')
+         link=vidUrl2
+         trueUrl="http://www.ted.com" + link + "#.mp4"
+         dir.Append(VideoItem((trueUrl), title=title,subtitle=subtitle, thumb=thumb))
 
-  # Directory.
-  elif count == 2:
-    (theSection,name1) = Utils.DecodeUrlPathToString(pathNouns[0]).split('$')
+    return dir    
+####################################################################################################
 
-    if name1 == 'Top Twelves':
-      (val,name) = Utils.DecodeUrlPathToString(pathNouns[1]).split('$')
-      dir.SetAttr("title2", name)
-      for v in XML.ElementFromURL(TED_ROOT + '?viewtype=list&orderedby=' + val, True).xpath('//div[@class="browser"]/div/dl'):
-        dir.AppendItem(getVideoPageContents(scrapeVideoListingContents(v, True, False)))
-    #elif name1 == 'All Talks':
-      #dir = getVideoPage(pathNouns[1])
-    elif name1 == 'Speakers':
-      (val,duration,thumb,title) = pathNouns[1].split('$')
-      dir.SetAttr("title2", Utils.DecodeUrlPathToString(title))
-      for v in XML.ElementFromString(getFixedPage("http://www.ted.com" + Utils.DecodeUrlPathToString(val)), True).xpath('//dl[@class="box clearfix"]'):
-        #dir.AppendItem(scrapeVideoListing(v, True, False, hasConferenceTitle=False))
-        dir.AppendItem(getVideoPageContents(scrapeVideoListingContents(v, True, False, hasConferenceTitle=False)))
-    elif name1 == 'Themes':
-      (val,duration,thumb,title) = pathNouns[1].split('$')
-      dir.SetAttr("title2", Utils.DecodeUrlPathToString(title))
+def FrontPageList(sender,pageUrl):
+   
+    dir = MediaContainer(title2=sender.itemTitle, viewGroup="List")
+    
+    dir.Append(Function(DirectoryItem(FrontPageSort, "Technology"), pageUrl = "1"))
+    dir.Append(Function(DirectoryItem(FrontPageSort, "Entertainment"), pageUrl = "2"))
+    dir.Append(Function(DirectoryItem(FrontPageSort, "Design"), pageUrl = "3"))
+    dir.Append(Function(DirectoryItem(FrontPageSort, "Business"), pageUrl = "4"))
+    dir.Append(Function(DirectoryItem(FrontPageSort, "Science"), pageUrl = "5"))
+    dir.Append(Function(DirectoryItem(FrontPageSort, "Global Issues"), pageUrl = "7"))
+    dir.Append(Function(DirectoryItem(FrontPageSort, "All"), pageUrl = "0"))
+    
+    return dir
+####################################################################################################
 
-      jsonPage = GetFixedXML("http://www.ted.com" + Utils.DecodeUrlPathToString(val), True).xpath('//div[@class="speakers"]/script[2]')[0].text
-      jsonPage = jsonPage.split("\n")[2]
-      jsonPage = re.sub(r'\s+var dsTalks = new YAHOO\.util\.DataSource\("([^"]+)"\).*', r'\1', jsonPage)
-      jsonPage = 'http://www.ted.com' + jsonPage
-      Log.Add(jsonPage)
-      dict = JSON.DictFromURL(jsonPage)
-      for v in dict[u'resultSet'][u'result']:
-        dir.AppendItem(getVideoPageContents(scrapeJSONlisting(v)))
-      for v in GetFixedXML("http://www.ted.com" + Utils.DecodeUrlPathToString(val), True).xpath('//div[@class="clearfix"]/dl'):
-        dir.AppendItem(getVideoPageContents(scrapeVideoListingContents(v, True, True)))
-        #dir.AppendItem(scrapeVideoListing(v, True, True))
-    elif name1 == 'Tags':
-      (val,name) = pathNouns[1].split('$')
-      dir.SetAttr("title2", name)
-      try:
-        pageCount = re.sub(r'.*?(\d+)$', r'\1', XML.ElementFromURL("http://www.ted.com" + Utils.DecodeUrlPathToString(val), True).xpath("//div[@class='pagination clearfix']/p")[0].text)
-        Log.Add("Page count: " + str(pageCount))
-      except:
-        pageCount = 1
-      for pageNum in range(1, int(pageCount) + 1):
-        for v in GetFixedXML("http://www.ted.com" + Utils.DecodeUrlPathToString(val) + '/page/' + str(pageNum), True).xpath('//div[@class="clearfix"]/dl'):
-          dir.AppendItem(getVideoPageContents(scrapeVideoListingContents(v, True, False, 'h3', False)))
-          #dir.AppendItem(scrapeVideoListing(v, True, False, 'h3', False))
-
-  # Video page.
-  #elif count == 3:
-    #dir = getVideoPage(pathNouns[2])
-
-  return dir.ToXML()
+def FrontPageSort(sender,pageUrl):
+    
+    dir = MediaContainer(title2=sender.itemTitle, viewGroup="List")
+    id=pageUrl
+    
+    newest="http://www.ted.com/talks/searchRpc?tagid=" + id + "&orderedby=NEWEST"
+    mosttrans="http://www.ted.com/talks/searchRpc?tagid=" + id + "&orderedby=MOSTTRANSLATED"
+    mostemail="http://www.ted.com/talks/searchRpc?tagid=" + id + "&orderedby=MOSTEMAILED"
+    mostdisc="http://www.ted.com/talks/searchRpc?tagid=" + id + "&orderedby=MOSTDISCUSSED"
+    mostfav="http://www.ted.com/talks/searchRpc?tagid=" + id + "&orderedby=MOSTFAVORITED"
+    jawdrop="http://www.ted.com/talks/searchRpc?tagid=" + id + "&orderedby=JAW-DRAPPING"
+    persu="http://www.ted.com/talks/searchRpc?tagid=" + id + "&orderedby=PERSUASIVE"
+    courage="http://www.ted.com/talks/searchRpc?tagid=" + id + "&orderedby=COURAGEOUS"
+    ingen="http://www.ted.com/talks/searchRpc?tagid=" + id + "&orderedby=INGENIOUS"
+    fasc="http://www.ted.com/talks/searchRpc?tagid=" + id + "&orderedby=FASCINATING"
+    inspi="http://www.ted.com/talks/searchRpc?tagid=" + id + "&orderedby=INSPIRING"
+    beaut="http://www.ted.com/talks/searchRpc?tagid=" + id + "&orderedby=BEAUTIFUL"
+    funny="http://www.ted.com/talks/searchRpc?tagid=" + id + "&orderedby=FUNNY"
+    infor="http://www.ted.com/talks/searchRpc?tagid=" + id + "&orderedby=INFORMATIVE"
+    
+    dir.Append(Function(DirectoryItem(gettalks, "Newest releases"), pageUrl = newest))
+    dir.Append(Function(DirectoryItem(gettalks, "Most Languages"), pageUrl = mosttrans))
+    dir.Append(Function(DirectoryItem(gettalks, "Most emailed this week"), pageUrl = mostemail))
+    dir.Append(Function(DirectoryItem(gettalks, "Most comments this week"), pageUrl = mostdisc))
+    dir.Append(Function(DirectoryItem(gettalks, "Most favorited of all-time"), pageUrl = mostfav))
+    dir.Append(Function(DirectoryItem(gettalks, "Rated jaw-dropping"), pageUrl = jawdrop))
+    dir.Append(Function(DirectoryItem(gettalks, "... persuasive"), pageUrl = persu))
+    dir.Append(Function(DirectoryItem(gettalks, "... ingenious"), pageUrl = ingen))
+    dir.Append(Function(DirectoryItem(gettalks, "... fascinating"), pageUrl = fasc))
+    dir.Append(Function(DirectoryItem(gettalks, "... inspiring"), pageUrl = inspi))
+    dir.Append(Function(DirectoryItem(gettalks, "... beautiful"), pageUrl = beaut))
+    dir.Append(Function(DirectoryItem(gettalks, "... funny"), pageUrl = funny))
+    dir.Append(Function(DirectoryItem(gettalks, "... informative"), pageUrl = infor))
+    
+    return dir
 
 ####################################################################################################
-def scrapeVideoListing(v, hasPlayImg, hasDuration, heading='h4', hasConferenceTitle=True):
-  if hasPlayImg:
-    thumb = v.xpath('dt/a/img[2]')[0].get('src')
-  else: thumb = v.xpath('dt/a/img')[0].get('src')
-  url = v.xpath('dt/a')[0].get('href')
-  if not hasDuration:
-    duration = 0
-  else:
-    duration = v.xpath('dd/ul/li[2]/div/em')[0].text.split()[0].split(':')
-    duration = (int(duration[0])*60 + int(duration[1])) * 1000
-  if hasConferenceTitle:
-    title = v.xpath('dd/' + heading + '/a')[0].text.encode('ascii','ignore')
-  else:
-    title = v.xpath('dd/ul/li/' + heading + '/a')[0].text.encode('ascii','ignore')
-  return DirectoryItem(Utils.EncodeStringToUrlPath(url) + '$' + str(duration) + '$' + Utils.EncodeStringToUrlPath(thumb) + '$' + Utils.EncodeStringToUrlPath(title), title, thumb)
 
-def scrapeVideoListingContents(v, hasPlayImg, hasDuration, heading='h4', hasConferenceTitle=True):
-  if hasPlayImg:
-    thumb = v.xpath('dt/a/img[2]')[0].get('src')
-  else: thumb = v.xpath('dt/a/img')[0].get('src')
-  url = v.xpath('dt/a')[0].get('href')
-  if not hasDuration:
-    duration = 0
-  else:
-    duration = v.xpath('dd/ul/li[2]/div/em')[0].text.split()[0].split(':')
-    duration = (int(duration[0])*60 + int(duration[1])) * 1000
-  if hasConferenceTitle:
-    title = v.xpath('dd/' + heading + '/a')[0].text.encode('ascii','ignore')
-  else:
-    title = v.xpath('dd/ul/li/' + heading + '/a')[0].text.encode('ascii','ignore')
-  return url + '$' + str(duration) + '$' + thumb + '$' + title
+def ThemeList(sender,pageUrl):
+   
+    dir = MediaContainer(title2=sender.itemTitle, viewGroup="List")
+
+    
+    content = HTML.ElementFromURL(pageUrl)
+    page=HTTP.Request(pageUrl)
+
+    
+    for themes in content.xpath('//div[@id="maincontent"]/div/div/div/ul/li/a'):
+        themeid=themes.get('href')
+        themeid=themeid.replace('/talks/tags/id/','')
+        themename=themes.text
+        themeUrl="http://www.ted.com" + themeid
+        link=HTML.ElementFromURL(themeUrl).xpath('//link[@rel="alternate"]')[0].get('href')
+        dir.Append(Function(DirectoryItem(ThemeSort, title=themename), pageUrl = link))
+    
+    return dir
 
 ####################################################################################################
-def getVideoPage(pathNoun):
-  (url,duration,thumb,title) = pathNoun.split('$')
-  title = Utils.DecodeUrlPathToString(title)
-  dir = MediaContainer("art-default.png", "Details", "TED Talks", title)
-  page = XML.ElementFromURL('http://www.ted.com' + Utils.DecodeUrlPathToString(url), True)
-  try:
-    summary = ' '.join([e.text.strip() for e in page.xpath("id('tagline')")])
-  except:
-    summary = ''
 
-  key = None
-  for a in page.xpath('//dl[@class="downloads"]/dt/a'):
-    if a.get('href').find('/talks/download/video') != -1:
-      key = a.get('href')
+def ThemeSort(sender,pageUrl):
+    dir = MediaContainer(title2=sender.itemTitle, viewGroup="List")
+    
+    content=XML.ElementFromURL(pageUrl)
+    
+    for item in content.xpath("/rss/channel/item"):
+        links=item.xpath("//link")
+        titles=item.xpath("//title")
+        pubdates=item.xpath("//pubDate")
+        descs=item.xpath("//description")
+        
+    count=-1
+    for link in links:
+        count=count+1
+        Log(count)
+        if count >1:
+            vidUrl=links[count].text
+            vidtitle=titles[count].text
+            viddate=pubdates[count-2].text
+            viddesc=descs[count-2].text
 
-  if key is not None:
-    key = 'http://www.ted.com' + key
+            
+            content=HTML.ElementFromURL(vidUrl).xpath('//dl[@class="downloads"]')[1]            
+            for items in content:
+                #if audio is available
+                vidUrl2=content.xpath('//dt')[3]
 
-  title = page.xpath("id('body')/h1/span")[0].text.strip()
-  Log.Add((key, title, summary, duration, Utils.DecodeUrlPathToString(thumb)))
-  dir.AppendItem(VideoItem(key, title, summary, duration, Utils.DecodeUrlPathToString(thumb)))
-  return dir
 
-def getVideoPageContents(pathNoun):
-  (url,duration,thumb,title) = pathNoun.split('$')
-  dir = MediaContainer("art-default.png", "Details", "TED Talks", title)
-  page = XML.ElementFromURL('http://www.ted.com' + url, True)
-  try:
-    summary = ' '.join([e.text.strip() for e in page.xpath("id('tagline')")])
-  except:
-    summary = ''
+        
+            link=vidUrl2.xpath("a")[0].get('href')
+            trueUrl="http://www.ted.com" + link + "#.mp4"
+            thumb=HTML.ElementFromURL(vidUrl).xpath('//link[@rel="image_src"]')[0].get('href')
 
-  key = None
-  for a in page.xpath('//dl[@class="downloads"]/dt/a'):
-    if a.get('href').find('/talks/download/video') != -1:
-      key = a.get('href')
+            dir.Append(VideoItem((trueUrl), title=vidtitle,subtitle=viddate, thumb=thumb, summary=viddesc))
 
-  if key is not None:
-    key = 'http://www.ted.com' + key
-
-  title = page.xpath("id('body')/h1/span")[0].text.strip()
-  return VideoItem(key, title, summary, duration, thumb)
-  #dir.AppendItem(VideoItem(key, title, summary, duration, thumb))
-  #return dir
-
+    return dir    
 ####################################################################################################
-def scrapeJSONlisting(item):
-  page = XML.ElementFromString(descape(item[u'markup']), True)
-  return scrapeVideoListing(page, True, False)
 
-####################################################################################################
-def GetXML(url, use_html_parser=False):
-  Plugin.Dict["CacheWorkaround"] = datetime.datetime.now()
-  return XML.ElementFromString(HTTP.GetCached(url,CACHE_TIME), use_html_parser)
+def TagsList(sender,pageUrl):
+    
+    dir = MediaContainer(title2=sender.itemTitle, viewGroup="List")
+    
+    content = HTML.ElementFromURL(pageUrl)
+    page=HTTP.Request(pageUrl)
 
-####################################################################################################
-def GetFixedXML(url, use_html_parser=False):
-  Plugin.Dict["CacheWorkaround"] = datetime.datetime.now()
-  return XML.ElementFromString(descape(HTTP.GetCached(url,CACHE_TIME)), use_html_parser)
+    
+    for tags in content.xpath('//div[@id="maincontent"]/div/div/div/ul/li/a'):
+        tagid=tags.get('href')
+        tagid=tagid.replace('/talks/tags/id/','')
+        tagname=tags.text
+        jsonUrl="http://www.ted.com/talks/searchRpc?tagid=" + tagid + "&orderedby=NEWEST"
+        
+        dir.Append(Function(DirectoryItem(gettalks, title=tagname), pageUrl = jsonUrl))
+        
+    return dir
 
-####################################################################################################
-def getFixedPage(url):
-  f = urllib.FancyURLopener().open(url)
-  p = f.read()
-  f.close()
-  return(descape(p))
+####################################################################################################    
+        
+def gettalks(sender,pageUrl):       
+     dir = MediaContainer(title2=sender.itemTitle, viewGroup="InfoList")   
+     jsontag=JSON.ObjectFromURL(pageUrl)['main']
 
-####################################################################################################
-def descape_entity(m, defs=htmlentitydefs.entitydefs):
-  entity = m.group(1)
-  if entity == "raquo":
-    return "_"
-  if entity == "nbsp":
-    return " "
+     for talks in jsontag:
+         id=talks['id']
+         talkDate=talks['talkDate']
+         talkfDate=talks['talkfDate']
+         talkcDate=talks['talkcDate']
+         talkpDate=talks['talkpDate']
+         talkDuration=talks['talkDuration']
+         talkLink=talks['talkLink']
+         talkLink="http://www.ted.com" + talkLink
+         
+         content=HTML.ElementFromURL(talkLink).xpath('//dl[@class="downloads"]')[1]            
+         for items in content:
+             #if audio is available
+             vidUrl2=content.xpath("dt")[2]
+             
 
-  return m.group(0)
-#  if entity == "lt" or entity == "amp" or entity == "gt" or entity == "quot" or entity == "apos": return(m.group(0))
-#  try:
-#    return defs[m.group(1)]
-#  except KeyError:
-#    return m.group(0) # use as is
+            
+        
+         link=vidUrl2.xpath("a")[0].get('href')
+         trueUrl="http://www.ted.com" + link + "#.mp4"
+         link=trueUrl
 
-####################################################################################################
-def descape(string):
-  pattern = re.compile("&(\w+?);")
-  return pattern.sub(descape_entity, string)
 
+
+         tTitle=talks['tTitle']
+         altTitle=talks['altTitle']
+         blurb=talks['blurb']
+         blurb=blurb.replace("&#39;","'")
+         speaker=talks['speaker']
+         fName=talks['fName']
+         lName=talks['lName']
+            
+         talkratings=talks['ratings']
+         ratingname=[]
+         ratingid=[]
+         for ratings in talkratings:
+             ratingname.append(ratings['name'])
+             ratingid.append(ratings['id'])
+            
+         image=talks['image']
+         thumb="http://images.ted.com/images/ted/" + str(image) + "_240x180.jpg"
+
+         title2=talkDate + " (" + talkDuration + ")"
+         dir.Append(VideoItem(link, title=altTitle,subtitle=title2, thumb=thumb, summary=blurb))
+         
+     return dir
+            
+        
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
